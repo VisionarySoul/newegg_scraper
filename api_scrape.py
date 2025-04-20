@@ -6,6 +6,7 @@ import csv
 from datetime import datetime
 from fake_useragent import UserAgent
 import logging
+import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,6 +14,15 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 url = "https://www.newegg.com/store/api/PageDeals"
+
+# Create output directories if they don't exist
+local_output_dir = "scraped_data"  # Local directory
+docker_output_dir = "/app/scraped_data"  # Docker directory
+
+# Create both directories
+os.makedirs(local_output_dir, exist_ok=True)
+os.makedirs(docker_output_dir, exist_ok=True)
+logger.info(f"Output directories created/verified: {local_output_dir} and {docker_output_dir}")
 
 def get_random_user_agent():
     try:
@@ -45,15 +55,17 @@ def get_headers():
         "Sec-Fetch-Site": "same-origin",
         "DNT": "1",
         "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+        "Pragma": "no-cache",
+        "Origin": "https://www.newegg.com",
+        "Host": "www.newegg.com"
     }
 
 def get_random_delay():
-    # Random delay between 2 and 5 seconds
-    base_delay = random.uniform(2, 5)
+    # Increased base delay
+    base_delay = random.uniform(5, 10)  # Increased from 2-5 to 5-10 seconds
     # Add occasional longer delays
-    if random.random() < 0.1:  # 10% chance of longer delay
-        base_delay += random.uniform(2, 5)
+    if random.random() < 0.2:  # 20% chance of longer delay
+        base_delay += random.uniform(5, 10)
     return base_delay
 
 def make_request(session, url, params, retry_count=0, max_retries=3):
@@ -69,7 +81,7 @@ def make_request(session, url, params, retry_count=0, max_retries=3):
             return response
         elif response.status_code == 403 and retry_count < max_retries:
             logger.warning(f"Got 403, retrying ({retry_count + 1}/{max_retries})...")
-            time.sleep(random.uniform(5, 10))  # Longer delay on 403
+            time.sleep(random.uniform(10, 15))  # Increased delay on 403
             return make_request(session, url, params, retry_count + 1, max_retries)
         else:
             logger.error(f"Request failed with status code: {response.status_code}")
@@ -79,7 +91,7 @@ def make_request(session, url, params, retry_count=0, max_retries=3):
         logger.error(f"Error during request: {e}")
         if retry_count < max_retries:
             logger.info(f"Retrying ({retry_count + 1}/{max_retries})...")
-            time.sleep(random.uniform(5, 10))
+            time.sleep(random.uniform(10, 15))
             return make_request(session, url, params, retry_count + 1, max_retries)
         return None
 
@@ -158,53 +170,74 @@ for page in range(1, max_pages + 1):
 # Save results
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+def save_to_file(filename, data, mode='w'):
+    """Helper function to save data to both local and Docker directories"""
+    try:
+        # Save to local directory
+        local_path = os.path.join(local_output_dir, os.path.basename(filename))
+        with open(local_path, mode, encoding='utf-8') as f:
+            if isinstance(data, list):
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            else:
+                f.write(data)
+        logger.info(f"Data saved to local file: {local_path}")
+        
+        # Save to Docker directory
+        docker_path = os.path.join(docker_output_dir, os.path.basename(filename))
+        with open(docker_path, mode, encoding='utf-8') as f:
+            if isinstance(data, list):
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            else:
+                f.write(data)
+        logger.info(f"Data saved to Docker file: {docker_path}")
+    except Exception as e:
+        logger.error(f"Error saving file {filename}: {e}")
+
 # Save to CSV
-csv_filename = f"/app/scraped_data/newegg_products_{timestamp}.csv"
+csv_filename = f"newegg_products_{timestamp}.csv"
 fields = ["number", "title", "description", "bullet_description", "price", "rating", "seller", "product_number"]
 
-with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-    writer = csv.DictWriter(csvfile, fieldnames=fields)
-    writer.writeheader()
-    
-    for product in products_list:
-        row = {
-            "number": f"{product['item_counter']}",
-            "title": product["title"],
-            "description": product["description"],
-            "bullet_description": product["bullet_description"],
-            "price": product["price"],
-            "rating": product["rating"],
-            "seller": product["seller"],
-            "product_number": product["product_number"]
-        }
-        writer.writerow(row)
+# Prepare CSV data
+csv_data = []
+csv_data.append(','.join(fields))  # Header
+for product in products_list:
+    row = [
+        f"{product['item_counter']}",
+        product["title"],
+        product["description"],
+        product["bullet_description"],
+        product["price"],
+        product["rating"],
+        product["seller"],
+        product["product_number"]
+    ]
+    csv_data.append(','.join(str(x).replace(',', ';') for x in row))
 
-logger.info(f"Data saved to CSV: {csv_filename}")
+# Save CSV
+save_to_file(csv_filename, '\n'.join(csv_data))
 
 # Save to JSON
-json_filename = f"/app/scraped_data/newegg_products_{timestamp}.json"
-with open(json_filename, 'w', encoding='utf-8') as jsonfile:
-    numbered_products = []
-    for product in products_list:
-        numbered_product = {
-            "number": f"{product['item_counter']}",
-            "title": product["title"],
-            "description": product["description"],
-            "bullet_description": product["bullet_description"],
-            "price": product["price"],
-            "rating": product["rating"] or "N/A",
-            "seller": product["seller"],
-            "product_number": product["product_number"]
-        }
-        numbered_products.append(numbered_product)
-    
-    json.dump(numbered_products, jsonfile, indent=2, ensure_ascii=False)
+json_filename = f"newegg_products_{timestamp}.json"
+numbered_products = []
+for product in products_list:
+    numbered_product = {
+        "number": f"{product['item_counter']}",
+        "title": product["title"],
+        "description": product["description"],
+        "bullet_description": product["bullet_description"],
+        "price": product["price"],
+        "rating": product["rating"] or "N/A",
+        "seller": product["seller"],
+        "product_number": product["product_number"]
+    }
+    numbered_products.append(numbered_product)
 
-logger.info(f"Data saved to JSON: {json_filename}")
+# Save JSON
+save_to_file(json_filename, numbered_products)
 
-# Log summary of the scraping session
+# Log summary
 logger.info(f"\nScraping Summary:")
 logger.info(f"Total products scraped: {len(products_list)}")
-logger.info(f"Files generated:")
+logger.info(f"Files generated in both local and Docker directories:")
 logger.info(f"- CSV: {csv_filename}")
 logger.info(f"- JSON: {json_filename}")
